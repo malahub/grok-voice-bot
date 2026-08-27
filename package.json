@@ -1,0 +1,28 @@
+{
+  "name": "grok-voice-verification-bot",
+  "version": "1.0.0",
+  "description": "Grok Voice + Twilio verification bot with scenario workflows and human handoff",
+  "scripts": {
+    "start": "ts-node src/index.ts",
+    "outbound": "ts-node src/outbound.ts",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "dotenv-flow": "^4.1.0",
+    "express": "^4.21.0",
+    "express-ws": "^5.0.2",
+    "node-color-log": "^12.0.1",
+    "node-fetch": "^2.7.0",
+    "twilio": "^5.10.7",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/express-ws": "^3.0.5",
+    "@types/node": "^22.7.4",
+    "@types/node-fetch": "^2.6.13",
+    "@types/ws": "^8.5.12",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.2"
+  }
+}
