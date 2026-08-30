@@ -63,8 +63,14 @@ const tools = [
   },
 ];
 
-// Track active streams: callId -> { twilio streamSid, twilio ws, xai ws, callSid }
+// Track active streams: callId -> { twilio streamSid, twilio ws, xai ws, callSid, to }
 const activeStreams: Record<string, any> = {};
+
+// Handoff state
+const pendingHandoffs: Record<string, { callSid: string; reason: string; remoteNumber: string }> = {};
+
+// Store the public HTTPS base URL for handoff redirects
+let serverBaseUrl = "";
 
 // ========================================
 // Tool Handlers
@@ -87,13 +93,30 @@ async function handleToolCall(callId: string, name: string, args: Record<string,
         return JSON.stringify({ success: false, message: "No active call to hand off." });
       }
 
-      // Tell Grok to inform the remote party a transfer is happening
-      return JSON.stringify({
-        success: true,
-        instruction:
-          "Warm transfer: tell the remote person 'One moment please, let me connect you with my supervisor who can assist further.' Then hand control to the human. Do not hang up on the remote person.",
-        transfer_phone: HANDOFF_PHONE,
-      });
+      const twilioCallSid = stream.callSid;
+      const remoteNumber = stream.to || "unknown";
+
+      // Store handoff pending
+      pendingHandoffs[callId] = { callSid: twilioCallSid, reason, remoteNumber };
+
+      // Redirect the active call to our handoff TwiML endpoint
+      // This replaces the Grok stream with a <Dial> to Steven
+      const handoffUrl = `${serverBaseUrl}/handoff-twiml/${callId}?reason=${encodeURIComponent(reason)}`;
+      try {
+        const updateResult = await twilioClient.calls(twilioCallSid).update({
+          method: "POST",
+          url: handoffUrl,
+        });
+        console.log(`[${callId}] Call redirecting to handoff: ${updateResult.status}`);
+        return JSON.stringify({
+          success: true,
+          instruction: "Tell the remote person: 'Let me connect you with someone who can help further. One moment please.' Then wait.",
+          action_taken: "redirecting to handoff",
+        });
+      } catch (err: any) {
+        console.error(`[${callId}] Handoff redirect failed:`, err?.message);
+        return JSON.stringify({ success: false, message: `Redirect failed: ${err?.message}` });
+      }
     }
 
     default:
@@ -263,6 +286,9 @@ app.ws("/media-stream/:callId", (ws, req) => {
     callSid = msg.start.callSid;
     console.log(`[${callId}] twilio.start streamSid=${streamSid} `);
 
+    // Track for handoff
+    activeStreams[callId] = { streamSid, callSid, to: "", tw, xaiWs: null };
+
     // Connect to Grok Voice
     xaiWs = new WebSocket(API_URL, {
       headers: { Authorization: `Bearer ${XAI_API_KEY}` },
@@ -399,6 +425,30 @@ app.post("/call-status", (req, res) => {
 });
 
 // ========================================
+// Handoff TwiML — redirects an active call to Steven's phone
+// ========================================
+app.post("/handoff-twiml/:callId", (req, res) => {
+  const callId = req.params.callId;
+  const reason = (req.query.reason as string) || "the caller needs human assistance";
+  const h = pendingHandoffs[callId];
+
+  console.log(`[${callId}] === HANDSET HANDOFF: ${reason} ===`);
+  if (h) console.log(`  Remote: ${h.remoteNumber}, CallSid: ${h.callSid}`);
+
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">Please hold while I connect you with someone who can assist.</Say>
+  <Dial timeout="30" callerId="${TWILIO_PHONE_NUMBER}">
+    <Number>${HANDOFF_PHONE}</Number>
+  </Dial>
+  <Say voice="Polly.Joanna">I'm sorry, no one is available right now. Someone will call you back shortly. Thank you.</Say>
+</Response>`;
+  res.status(200);
+  res.type("text/xml");
+  res.end(twiml);
+});
+
+// ========================================
 // Start the server
 // ========================================
 // Start the server on a free port
@@ -413,14 +463,17 @@ function findFreePort(): Promise<number> {
 (async () => {
   const PORT = process.env.PORT ? parseInt(process.env.PORT) : await findFreePort();
   app.listen(PORT, () => {
-    console.log(`\n[Grok Voice Verification Bot]`);
-    console.log(`  Port: ${PORT}`);
-    console.log(`  Available scenarios: ${Object.keys(SCENARIOS).join(", ")}`);
-    if (HOSTNAME) {
-      console.log(`  Public HOSTNAME: ${HOSTNAME}`);
-    } else {
-      console.log("  HOSTNAME not set - set HOSTNAME env var on Coolify.");
-    }
-    console.log("");
+      console.log(`\n[Grok Voice Verification Bot]`);
+      console.log(`  Port: ${PORT}`);
+      console.log(`  Available scenarios: ${Object.keys(SCENARIOS).join(", ")}`);
+      if (HOSTNAME) {
+        console.log(`  Public HOSTNAME: ${HOSTNAME}`);
+        serverBaseUrl = `https://${HOSTNAME}`;
+      } else {
+        serverBaseUrl = `http://localhost:${PORT}`;
+        console.log("  HOSTNAME not set - start cloudflared tunnel and set HOSTNAME.");
+      }
+      console.log(`  Handoff phone: ${HANDOFF_PHONE || "not set"}`);
+      console.log("");
   });
 })();

@@ -4,8 +4,7 @@
  * Each scenario renders a system prompt that makes the speech-to-speech model
  * sound like an actual person making a routine call: loose rhythm, contractions,
  * natural disfluency, warm openings, graceful exits, zero IVR-speak, and a
- * hard privacy rule: NEVER recite account numbers unless given explicit context
- * AND the other side cannot find the account otherwise.
+ * hard privacy rule: you share enough detail for them to find the account, but do NOT recite full account/card numbers if you don't have them in context.
  */
 
 export interface CallContext {
@@ -27,6 +26,8 @@ export interface CallContext {
   company?: string;
   /** e.g. "Capital One" */
   creditor?: string;
+  /** Mailing address to give if they need to send something */
+  address?: string;
 }
 
 export interface Scenario {
@@ -59,12 +60,20 @@ You are a real person making a phone call. You are NOT a chatbot, an automated r
 ### Interruptions
 - If the other person starts talking while you are speaking, STOP IMMEDIATELY. Do not finish your sentence, do not talk over them, do not get louder. Just stop, let them finish, and respond to what they actually said. It is totally fine to trail off: "so I was wondering if—, oh sorry, go ahead."
 
-### Privacy — ABSOLUTE RULES (violating these gets people in real trouble)
-- NEVER recite, spell out, summarize, or "confirm" account numbers, card numbers, last-4 digits, SSNs, dates of birth, or PINs — unless a specific reference was given to you in your context AND the person on the other end needs it and cannot find the account without it.
-- If context does NOT give you a reference, do not invent one. Say you're calling about "the account on file" and ask them to look it up under the account holder's name, or by the last statement.
-- If they say "do you have the account number?", and you have no reference in context, respond naturally: "I don't have that in front of me, sorry — it should be on file under [name]. Can you pull it up that way?" If they need more, offer to email or fax the details instead of reading them over the phone.
-- NEVER invent balances, amounts, dates, or numbers. Only relay information that is actually given to you on the call.
-- If you are asked to verify identity and cannot, be honest: "I've got authorization on file, but I don't have that detail in front of me. Can I get it to you another way?"`;
+### Identity & Information — share these EVERY call
+- You are **{{FULLNAME}}**. Introduce yourself by name naturally in your opening.
+- Share the context you have so they can find the record: company/creditor name, check number, invoice number, amount, date. These are document references, NOT secrets — say them clearly.
+- Examples: "Hey, it's Steven — calling about the Capital One account, just need the current balance." / "Steven here — checking whether check 4821 for twelve-forty has been cashed." / "I'm Steven, verifying an invoice from ABC Supply, number 23992, for four hundred dollars."
+- Amounts conversationally: "twelve hundred forty" not "one thousand two hundred forty dollars and zero cents."
+- Dates casually: "issued July 2nd" not "on the date July 2 comma 2026."
+- **Mailing address:** if they ask where to send something, give the address on file from your context. If no address is in your context, say: "Anything to mail goes to Steven Malagon — I'll confirm the address before we hang up." Never invent an address.
+- If they ask for an account/card number you don't have: "It should be under Steven Malagon — can you pull it up that way?" Offer to call back or have it emailed if they insist.
+- State your name and the account details WITHOUT hesitation. Sound like you've done this a hundred times.
+
+### Privacy — what NOT to do
+- Do NOT invent an account number, card number, SSN, DOB, PIN, address, balance, or amount. Only use details actually given to you in context.
+- Do NOT recite full card numbers or SSNs even if you happen to have them — confirm the last-4 only if the rep asks and you actually have it in context.
+- Check numbers, invoice numbers, company names, and payment amounts ARE fine to share — they're how the rep finds the record.`;
 
 // ---------------------------------------------------------------------------
 // Scenario templates — each renders with optional {{PLACEHOLDERS}}.
@@ -169,8 +178,8 @@ You are calling a bank or financial institution to verify whether a specific che
 // Wiring
 // ---------------------------------------------------------------------------
 const FALLBACKS: Record<string, string> = {
-  name: "here",
-  fullName: "the account holder",
+  name: "Steven",
+  fullName: "Steven Malagon",
   accountRef: "the account on file",
   invoiceNumber: "the invoice we received",
   checkNumber: "a check we issued",
@@ -178,6 +187,7 @@ const FALLBACKS: Record<string, string> = {
   date: "",
   company: "your company",
   creditor: "your company",
+  address: "",
 };
 
 export const SCENARIOS: Record<string, Scenario> = {
@@ -185,35 +195,57 @@ export const SCENARIOS: Record<string, Scenario> = {
     id: "balance_check",
     name: "Balance Check",
     voice: "sal", // smooth & balanced — the most "normal human" voice
-    render: (ctx) => `${SHARED_STYLE}\n\n${interpolate(balance_check, ctx)}`,
+    render: (ctx) => `${SHARED_STYLE}\n\n${contextBlock(ctx)}\n\n${interpolate(balance_check, ctx)}`,
   },
   payoff_query: {
     id: "payoff_query",
     name: "Loan Payoff Quote",
     voice: "atlas", // confident, commanding, reassuring
-    render: (ctx) => `${SHARED_STYLE}\n\n${interpolate(payoff_query, ctx)}`,
+    render: (ctx) => `${SHARED_STYLE}\n\n${contextBlock(ctx)}\n\n${interpolate(payoff_query, ctx)}`,
   },
   payoff_credit_card: {
     id: "payoff_credit_card",
     name: "Credit Card Payoff",
     voice: "perseus", // strong, confident, trustworthy
-    render: (ctx) => `${SHARED_STYLE}\n\n${interpolate(payoff_credit_card, ctx)}`,
+    render: (ctx) => `${SHARED_STYLE}\n\n${contextBlock(ctx)}\n\n${interpolate(payoff_credit_card, ctx)}`,
   },
   verify_bill: {
     id: "verify_bill",
     name: "Verify Bill/Invoice",
     voice: "celeste", // compassionate, confident, reassuring
-    render: (ctx) => `${SHARED_STYLE}\n\n${interpolate(verify_bill, ctx)}`,
+    render: (ctx) => `${SHARED_STYLE}\n\n${contextBlock(ctx)}\n\n${interpolate(verify_bill, ctx)}`,
   },
   check_cashed: {
     id: "check_cashed",
     name: "Check Cashed Status",
     voice: "ursa", // friendly, warm, steadfast
-    render: (ctx) => `${SHARED_STYLE}\n\n${interpolate(check_cashed, ctx)}`,
+    render: (ctx) => `${SHARED_STYLE}\n\n${contextBlock(ctx)}\n\n${interpolate(check_cashed, ctx)}`,
   },
 };
 
 export const LIVE_SCENARIOS = Object.keys(SCENARIOS);
+
+/**
+ * Render an explicit, no-ambiguity context block the model sees FIRST,
+ * so it always knows the caller's identity and the account details to share.
+ */
+function contextBlock(ctx: CallContext): string {
+  const lines: string[] = [];
+  lines.push("## YOUR IDENTITY & ACCOUNT DETAILS (share these on the call)");
+  lines.push(`- Caller name: ${ctx.name || "Steven"}`);
+  lines.push(`- Caller full name: ${ctx.fullName || "Steven Malagon"}`);
+  if (ctx.creditor || ctx.company) lines.push(`- Company / creditor: ${ctx.creditor || ctx.company}`);
+  if (ctx.accountRef) lines.push(`- Account reference: ${ctx.accountRef}`);
+  if (ctx.invoiceNumber) lines.push(`- Invoice number: ${ctx.invoiceNumber}`);
+  if (ctx.checkNumber) lines.push(`- Check number: ${ctx.checkNumber}`);
+  if (ctx.amount) lines.push(`- Amount: ${ctx.amount}`);
+  if (ctx.date) lines.push(`- Date: ${ctx.date}`);
+  if (ctx.address) lines.push(`- Mailing address (give this if they ask where to send anything): ${ctx.address}`);
+  if (lines.length === 3) {
+    lines.push("- (No account-specific details were provided — ask them to look up the account under Steven Malagon's name.)");
+  }
+  return lines.join("\n");
+}
 
 function interpolate(template: string, ctx: CallContext): string {
   let out = template;
