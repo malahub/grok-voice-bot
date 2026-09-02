@@ -3,7 +3,7 @@ import express from "express";
 import ExpressWs from "express-ws";
 import * as crypto from "crypto";
 import Twilio from "twilio";
-import { getScenario, SCENARIOS, renderInstructions, CallContext } from "./scenarios";
+import { getScenario, SCENARIOS, renderInstructions, CallContext, getVoiceForScenario } from "./scenarios";
 import { TwilioMediaStreamWebsocket } from "./twilio";
 
 const { app } = ExpressWs(express());
@@ -26,6 +26,40 @@ const HANDOFF_PHONE = process.env.HANDOFF_PHONE || "";
 const twilioClient = Twilio(TWILIO_API_KEY_SID, TWILIO_API_KEY_SECRET, {
   accountSid: TWILIO_ACCOUNT_SID,
 });
+
+// Steven's phone numbers
+const STEVEN_NUMBERS = ["+15613012117", "+15615041239", "+15616285628"];
+
+// Call log: track numbers we've called so inbound calls can be matched
+const callLog: Record<string, { lastCallAt: string; scenario: string; context: any; attempts: number }> = {};
+
+function logCall(number: string, scenario: string, ctx: any) {
+  const normalized = number.replace(/\D/g, "");
+  callLog[normalized] = {
+    lastCallAt: new Date().toISOString(),
+    scenario: scenario,
+    context: ctx,
+    attempts: (callLog[normalized]?.attempts || 0) + 1,
+  };
+  // Persist to file for debugging
+  const fs = require("fs");
+  try {
+    fs.writeFileSync("C:/Users/steve/AppData/Local/Temp/grok_call_log.json", JSON.stringify(callLog, null, 2));
+  } catch (_) {}
+}
+
+function findCaller(normalizedNumber: string): { name: string; lastCallAt: string; scenario: string; context: any } | null {
+  const n = normalizedNumber.replace(/\D/g, "");
+  const entry = callLog[n];
+  if (!entry) return null;
+  const ctx = entry.context || {};
+  return {
+    name: ctx.fullName || ctx.name || "caller",
+    lastCallAt: entry.lastCallAt,
+    scenario: entry.scenario,
+    context: ctx,
+  };
+}
 
 // ========================================
 // Tool Definitions - handoff to human
@@ -147,6 +181,120 @@ app.post("/twiml", (req, res) => {
 });
 
 // ========================================
+// INBOUND SMS — receives texts to our Twilio number
+// ========================================
+app.post("/inbound-sms", (req, res) => {
+  const from = (req.body.From || "").trim();
+  const body = (req.body.Body || "").trim();
+  const fromNormalized = from.replace(/\D/g, "");
+
+  const isSteven = STEVEN_NUMBERS.some(n => n.replace(/\D/g, "") === fromNormalized);
+  const caller = findCaller(fromNormalized);
+
+  console.log(`\n[SMS] From: ${from} | Steven: ${isSteven} | Body: ${body}`);
+  if (caller) console.log(`[SMS] Matched caller: ${caller.name} (${caller.scenario}, last called ${caller.lastCallAt})`);
+
+  // Write SMS to log file
+  const fs = require("fs");
+  fs.appendFileSync("C:/Users/steve/AppData/Local/Temp/inbound_sms.log",
+    `${new Date().toISOString()} | FROM: ${from} | STEVEN: ${isSteven} | ${caller ? "KNOWN: " + caller.name : "UNKNOWN"} | ${body}\n`);
+
+  // Always respond with 200 to acknowledge receipt
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?><Response></Response>`;
+  res.status(200);
+  res.type("text/xml");
+  res.end(twiml);
+});
+
+// ========================================
+// INBOUND VOICE — someone is calling our Twilio number
+// ========================================
+app.post("/inbound-voice", (req, res) => {
+  const from = (req.body.From || "").trim();
+  const callSid = (req.body.CallSid || "").trim();
+  const fromNormalized = from.replace(/\D/g, "");
+  const isSteven = STEVEN_NUMBERS.some(n => n.replace(/\D/g, "") === fromNormalized);
+  const caller = findCaller(fromNormalized);
+
+  console.log(`\n[INBOUND CALL] From: ${from} | Steven: ${isSteven} | CallSid: ${callSid}`);
+  if (caller) console.log(`[INBOUND CALL] Matched: ${caller.name} (scenario: ${caller.scenario})`);
+
+  const callId = `inbound_${crypto.randomBytes(6).toString('hex')}`;
+
+  if (isSteven) {
+    // Steven called — just play a brief greeting and record any instructions
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">Hey Steven. I'm listening. What do you need?</Say>
+  <Record maxLength="120" transcribe="true" timeout="15" finishOnKey="#"
+    action="/inbound-recording?callId=${callId}&from=${encodeURIComponent(from)}"
+    transcribeCallback="/inbound-transcription?callId=${callId}&from=${encodeURIComponent(from)}"/>
+  <Say voice="Polly.Joanna">Got it, I'll handle it. Bye.</Say>
+</Response>`;
+    res.status(200);
+    res.type("text/xml");
+    res.end(twiml);
+    return;
+  }
+
+  // Someone else calling — use Grok Voice to handle it
+  // If it's a known caller we've contacted, the bot knows the context
+  let instructions = `You are answering an inbound call to the 723 Studios verification line. Be friendly, professional, and ask how you can help.`;
+  if (caller) {
+    const ctx = caller.context || {};
+    instructions = `You are answering a callback from ${caller.name}. We previously called them about: ${caller.scenario}. Context: ${JSON.stringify(ctx)}. They may be returning our call with information. Be friendly and take down what they say.`;
+    console.log(`[INBOUND CALL] Using matched caller context: ${caller.name}`);
+  }
+
+  if (!HOSTNAME) {
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">Hello, you've reached 723 Studios. How can I help you?</Say>
+  <Record maxLength="120" transcribe="true" timeout="30" finishOnKey="#"/>
+  <Say voice="Polly.Joanna">Thank you, goodbye.</Say>
+</Response>`;
+    res.status(200);
+    res.type("text/xml");
+    res.end(twiml);
+    return;
+  }
+
+  const instructionsEncoded = encodeURIComponent(instructions);
+  const streamUrl = `wss://${HOSTNAME}/media-stream/${callId}?scenario=balance_check&instructions=${instructionsEncoded}`;
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <Stream url="${streamUrl}" />
+  </Connect>
+</Response>`;
+  res.status(200);
+  res.type("text/xml");
+  res.end(twiml);
+});
+
+// Inbound recording callback
+app.post("/inbound-recording", (req, res) => {
+  const callId = req.query.callId as string;
+  const recordingUrl = req.body.RecordingUrl || "";
+  console.log(`[${callId}] Recording: ${recordingUrl}`);
+  res.status(200).send();
+});
+
+// Inbound transcription callback
+app.post("/inbound-transcription", (req, res) => {
+  const callId = req.query.callId as string;
+  const text = (req.body.TranscriptionText || "").trim();
+  const from = (req.query.from as string) || "unknown";
+  console.log(`[${callId}] Transcription from ${from}: "${text}"`);
+  if (text) {
+    const fs = require("fs");
+    fs.appendFileSync("C:/Users/steve/AppData/Local/Temp/inbound_steven_instructions.log",
+      `${new Date().toISOString()} | ${text}\n`);
+  }
+  res.status(200).send();
+});
+
+// ========================================
 // MAIN: Outbound AI Call Entry Point
 // ========================================
 // POST /start-call  { to, scenario, from? }
@@ -198,10 +346,10 @@ app.post("/start-call", async (req, res) => {
   } catch (e: any) {
     return res.status(500).json({ error: String(e.message || e) });
   }
-});
 
-// ========================================
-// Twilio TwiML endpoint — called when Twilio initiates the outbound call
+  // Track the outbound call for inbound matching
+  logCall(target, scenario, ctx);
+});
 // ========================================
 app.post("/conn", (req, res) => {
   const scenario = (req.query.scenario as string) || "balance_check";
@@ -263,11 +411,14 @@ app.ws("/media-stream/:callId", (ws, req) => {
     }
   }
   if (!ctx.name) ctx.name = "Steven";
-  const scenario = getScenario(scenarioName);
 
-  const instructions = renderInstructions(scenarioName, ctx);
-  console.log(`\n[${callId}] === CALL STARTED (scenario: ${scenario.name}, voice: ${scenario.voice}) ===`);
-  console.log(`[${callId}] Context: ${JSON.stringify(ctx)}`);
+  // Custom instructions override — passed as query param for inbound calls
+  const instructionsOverride = Array.isArray(req.query.instructions) ? req.query.instructions[0] : req.query.instructions;
+  const instructions = instructionsOverride
+    ? decodeURIComponent(String(instructionsOverride))
+    : renderInstructions(scenarioName, ctx);
+  console.log(`\n[${callId}] === CALL STARTED (scenario: ${scenarioName}, voice: ${getVoiceForScenario(scenarioName)}) ===`);
+  console.log(`[${callId}] Context: ${JSON.stringify(ctx)}${instructionsOverride ? " [custom instructions]" : ""}`);
 
   const tw = new TwilioMediaStreamWebsocket(ws);
 
@@ -302,7 +453,7 @@ app.ws("/media-stream/:callId", (ws, req) => {
         type: "session.update",
         session: {
           instructions: instructions,
-          voice: scenario.voice,
+          voice: getVoiceForScenario(scenarioName),
           audio: {
             input: { format: { type: "audio/pcmu" } },
             output: { format: { type: "audio/pcmu" } },
@@ -311,7 +462,7 @@ app.ws("/media-stream/:callId", (ws, req) => {
           ...(ENABLE_TOOLS ? { tools } : {}),
         },
       };
-      console.log(`[${callId}] session.update (voice=${scenario.voice})`);
+      console.log(`[${callId}] session.update (voice=${getVoiceForScenario(scenarioName)})`);
       xaiWs.send(JSON.stringify(sessionConfig));
     });
 
