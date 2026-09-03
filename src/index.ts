@@ -196,11 +196,17 @@ app.post("/inbound-sms", (req, res) => {
 
   // Write SMS to log file
   const fs = require("fs");
-  fs.appendFileSync("C:/Users/steve/AppData/Local/Temp/inbound_sms.log",
+  fs.appendFileSync("/tmp/inbound_sms.log",
     `${new Date().toISOString()} | FROM: ${from} | STEVEN: ${isSteven} | ${caller ? "KNOWN: " + caller.name : "UNKNOWN"} | ${body}\n`);
 
-  // Always respond with 200 to acknowledge receipt
-  const twiml = `<?xml version="1.0" encoding="UTF-8"?><Response></Response>`;
+  // Reply to Steven with confirmation; ignore others
+  let reply = "";
+  if (isSteven) {
+    reply = "Got it, Steven. I'll route this to the fleet.";
+    console.log(`[SMS] Replying to Steven: "${reply}"`);
+  }
+
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?><Response>${reply ? `<Message>${reply}</Message>` : ""}</Response>`;
   res.status(200);
   res.type("text/xml");
   res.end(twiml);
