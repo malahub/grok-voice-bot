@@ -201,31 +201,31 @@ export const SCENARIOS: Record<string, Scenario> = {
   balance_check: {
     id: "balance_check",
     name: "Balance Check",
-    voice: "sal", // smooth & balanced — the most "normal human" voice
+    voice: "sirius", // Steven's pick — quick-witted, clever, playful
     render: (ctx) => `${SHARED_STYLE}\n\n${contextBlock(ctx)}\n\n${interpolate(balance_check, ctx)}`,
   },
   payoff_query: {
     id: "payoff_query",
     name: "Loan Payoff Quote",
-    voice: "atlas", // confident, commanding, reassuring
+    voice: "sirius", // Steven's pick — quick-witted, clever, playful
     render: (ctx) => `${SHARED_STYLE}\n\n${contextBlock(ctx)}\n\n${interpolate(payoff_query, ctx)}`,
   },
   payoff_credit_card: {
     id: "payoff_credit_card",
     name: "Credit Card Payoff",
-    voice: "perseus", // strong, confident, trustworthy
+    voice: "sirius", // Steven's pick — quick-witted, clever, playful
     render: (ctx) => `${SHARED_STYLE}\n\n${contextBlock(ctx)}\n\n${interpolate(payoff_credit_card, ctx)}`,
   },
   verify_bill: {
     id: "verify_bill",
     name: "Verify Bill/Invoice",
-    voice: "celeste", // compassionate, confident, reassuring
+    voice: "sirius", // Steven's pick — quick-witted, clever, playful
     render: (ctx) => `${SHARED_STYLE}\n\n${contextBlock(ctx)}\n\n${interpolate(verify_bill, ctx)}`,
   },
   check_cashed: {
     id: "check_cashed",
     name: "Check Cashed Status",
-    voice: "ursa", // friendly, warm, steadfast
+    voice: "sirius", // Steven's pick — quick-witted, clever, playful
     render: (ctx) => `${SHARED_STYLE}\n\n${contextBlock(ctx)}\n\n${interpolate(check_cashed, ctx)}`,
   },
 };
@@ -279,12 +279,11 @@ export function getVoiceForScenario(id: string): string {
 }
 
 /**
- * Default Grok flagship voice.
- * `castor` — "Charismatic, down-to-earth, and easygoing" — reads as a normal
- * adult on a phone line, which is exactly the goal for verification calls.
- * Proven working through both the TTS and realtime APIs.
+ * Default Grok flagship voice — Steven's pick.
+ * `sirius` — "Quick-witted, clever, and playful" — proven working through both
+ * the TTS and realtime APIs. All scenarios use this unless overridden.
  */
-export const DEFAULT_VOICE = "castor";
+export const DEFAULT_VOICE = "sirius";
 
 /** Voices verified to return real audio through the xAI TTS API. */
 export const PROVEN_VOICES = [
