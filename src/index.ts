@@ -148,7 +148,14 @@ const tools = [
     type: "function",
     name: "handoff_to_human",
     description:
-      "Transfer the call to a live human supervisor. Use this when the person on the line is getting frustrated, asks to speak with a manager or a real person, demands to know who you are, refuses to cooperate, or the situation requires a human. This bridges the call directly to the human supervisor.",
+      "Bridge this call to the real account holder (Steven) so the person on the line can speak with him directly. " +
+      "Use this IMMEDIATELY whenever the representative asks for or requires the account holder, owner, " +
+      "authorized person, or decision-maker — for example: 'I can only discuss this with the account holder', " +
+      "'I need the owner to authorize this', 'is this the account owner?', 'I'd need to speak with Steven directly', " +
+      "'I can't release that information to a third party', or any request for verbal authorization/verification " +
+      "that you cannot satisfy. ALSO use it when the person is frustrated, asks for a manager or a real person, " +
+      "demands to know who you are, refuses to cooperate, or whenever a human is simply required to finish the task. " +
+      "Do NOT keep negotiating once they have asked for the account holder — bridge the call.",
     parameters: {
       type: "object",
       properties: {
@@ -211,6 +218,34 @@ async function handleToolCall(callId: string, name: string, args: Record<string,
 
       // Store handoff pending
       pendingHandoffs[callId] = { callSid: twilioCallSid, reason, remoteNumber };
+
+      // Brief Steven by SMS so he isn't answering blind
+      if (HANDOFF_PHONE && TWILIO_PHONE_NUMBER) {
+        try {
+          const c = stream.ctx || {};
+          const bits: string[] = [];
+          if (c.company || c.creditor) bits.push(c.company || c.creditor);
+          if (c.invoiceNumber) bits.push(`invoice ${c.invoiceNumber}`);
+          if (c.checkNumber) bits.push(`check ${c.checkNumber}`);
+          if (c.accountRef) bits.push(`acct ref ${c.accountRef}`);
+          if (c.amount) bits.push(`$${c.amount}`);
+          const what = bits.length ? bits.join(", ") : (stream.scenario || "a verification call");
+          const brief =
+            `\u{1F4DE} Handoff incoming \u2014 calling you now.\n` +
+            `About: ${what}\n` +
+            `They need: ${reason}\n` +
+            `Their number: ${remoteNumber}\n` +
+            `Answer and you'll be connected directly.`;
+          await twilioClient.messages.create({
+            to: HANDOFF_PHONE,
+            from: TWILIO_PHONE_NUMBER,
+            body: brief.slice(0, 1500),
+          });
+          console.log(`[${callId}] Handoff briefing SMS sent to ${HANDOFF_PHONE}`);
+        } catch (err: any) {
+          console.log(`[${callId}] Handoff briefing SMS failed: ${err?.message}`);
+        }
+      }
 
       // Redirect the active call to our handoff TwiML endpoint
       // This replaces the Grok stream with a <Dial> to Steven
@@ -577,7 +612,7 @@ app.ws("/media-stream/:callId", (ws, req) => {
     console.log(`[${callId}] twilio.start streamSid=${streamSid} `);
 
     // Track for handoff
-    activeStreams[callId] = { streamSid, callSid, to: "", tw, xaiWs: null };
+    activeStreams[callId] = { streamSid, callSid, to: "", tw, xaiWs: null, scenario: scenarioName, ctx };
 
     // Connect to Grok Voice
     xaiWs = new WebSocket(API_URL, {
