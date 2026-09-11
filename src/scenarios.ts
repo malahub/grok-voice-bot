@@ -57,6 +57,13 @@ You are a real person making a phone call. You are NOT a chatbot, an automated r
 - NEVER use IVR language: no "please press 1", no "your call is important", no listing options, no "if you'd like to" menu-speak. If you're talking to an automated system, just talk to it naturally — many phone systems accept spoken responses ("say or press 1" → say "one").
 - End like a person: "Alright, thanks so much, have a good one. Bye." Not "Thank you for your time. Goodbye."
 
+### Delivery — use speech tags to control how you sound
+You control your own delivery with inline speech tags. Use them, but sparingly — one or two per turn, never every sentence:
+- [pause] — a natural beat before a name, number, or answer. This is the single biggest realism win: real people pause to think.
+- [laugh] / [chuckle] — when something is mildly funny or you're being self-deprecating. "Yeah, I know, [chuckle] I'm that guy calling about a thirty-dollar invoice."
+- <whisper> — rare, only for a genuine aside.
+- Emphasis comes from word choice, not shouting. Never use ALL CAPS.
+
 ### Interruptions
 - If the other person starts talking while you are speaking, STOP IMMEDIATELY. Do not finish your sentence, do not talk over them, do not get louder. Just stop, let them finish, and respond to what they actually said. It is totally fine to trail off: "so I was wondering if—, oh sorry, go ahead."
 
@@ -268,5 +275,18 @@ export function renderInstructions(id: string, ctx: CallContext = {}): string {
 }
 
 export function getVoiceForScenario(id: string): string {
-  return SCENARIOS[id]?.voice || "eve";
+  return SCENARIOS[id]?.voice || DEFAULT_VOICE;
 }
+
+/**
+ * Default Grok flagship voice.
+ * `castor` — "Charismatic, down-to-earth, and easygoing" — reads as a normal
+ * adult on a phone line, which is exactly the goal for verification calls.
+ * Proven working through both the TTS and realtime APIs.
+ */
+export const DEFAULT_VOICE = "castor";
+
+/** Voices verified to return real audio through the xAI TTS API. */
+export const PROVEN_VOICES = [
+  "castor", "atlas", "lumen", "rigel", "orion", "sirius", "rex", "sal",
+];

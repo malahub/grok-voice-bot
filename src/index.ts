@@ -2,8 +2,11 @@ import "dotenv-flow/config";
 import express from "express";
 import ExpressWs from "express-ws";
 import * as crypto from "crypto";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 import Twilio from "twilio";
-import { getScenario, SCENARIOS, renderInstructions, CallContext, getVoiceForScenario } from "./scenarios";
+import { getScenario, SCENARIOS, renderInstructions, CallContext, getVoiceForScenario, DEFAULT_VOICE } from "./scenarios";
 import { TwilioMediaStreamWebsocket } from "./twilio";
 
 const { app } = ExpressWs(express());
@@ -26,6 +29,82 @@ const HANDOFF_PHONE = process.env.HANDOFF_PHONE || "";
 const twilioClient = Twilio(TWILIO_API_KEY_SID, TWILIO_API_KEY_SECRET, {
   accountSid: TWILIO_ACCOUNT_SID,
 });
+
+// ========================================
+// Grok TTS — flagship voices, replaces Amazon Polly entirely.
+// Returns raw MP3 bytes for the given text + voice.
+// ========================================
+async function grokTTS(text: string, voice: string = DEFAULT_VOICE): Promise<Buffer> {
+  const resp = await fetch("https://api.x.ai/v1/tts", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${XAI_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      text: text,
+      voice_id: voice,
+      language: "en",
+      response_format: "mp3",
+    }),
+  });
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`xAI TTS ${resp.status}: ${body.slice(0, 300)}`);
+  }
+  const buf = Buffer.from(await resp.arrayBuffer());
+  if (buf.length < 500) {
+    throw new Error(`xAI TTS returned suspiciously small audio (${buf.length} bytes)`);
+  }
+  return buf;
+}
+
+// ---------------------------------------------------------------------------
+// Phrase cache — fixed server prompts (greetings, handoff lines) get
+// synthesized once with a Grok voice and replayed as <Play>. This is what
+// replaced Amazon Polly, which was the source of the "robot" sound.
+// ---------------------------------------------------------------------------
+const PHRASE_DIR = os.tmpdir();
+const phraseFiles: Record<string, string> = {};
+
+function phraseKey(text: string, voice: string): string {
+  return crypto.createHash("sha1").update(`${voice}|${text}`).digest("hex").slice(0, 16);
+}
+
+function phraseFilename(text: string, voice: string = DEFAULT_VOICE): string {
+  return `phrase_${phraseKey(text, voice)}.mp3`;
+}
+
+/** Synthesize (once) and return the on-disk filename for a fixed phrase. */
+async function warmPhrase(text: string, voice: string = DEFAULT_VOICE): Promise<string> {
+  const fname = phraseFilename(text, voice);
+  if (phraseFiles[fname]) return fname;
+  const full = path.join(PHRASE_DIR, fname);
+  if (!fs.existsSync(full)) {
+    const audio = await grokTTS(text, voice);
+    fs.writeFileSync(full, audio);
+    console.log(`[PHRASE] synthesized "${text.slice(0, 40)}..." (${audio.length}b)`);
+  }
+  phraseFiles[fname] = fname;
+  return fname;
+}
+
+/** Absolute URL for a cached phrase, for use inside TwiML <Play>. */
+function phraseUrl(fname: string): string {
+  const host = HOSTNAME || "localhost";
+  return `https://${host}/audio/${fname}`;
+}
+
+/** TwiML <Play> tag for a fixed phrase. Falls back to <Say> if synthesis fails. */
+async function playPhrase(text: string, voice: string = DEFAULT_VOICE): Promise<string> {
+  try {
+    const fname = await warmPhrase(text, voice);
+    return `<Play>${phraseUrl(fname)}</Play>`;
+  } catch (e: any) {
+    console.log(`[PHRASE] fallback to <Say> for "${text.slice(0, 30)}": ${e.message}`);
+    return `<Say voice="Polly.Joanna">${text}</Say>`;
+  }
+}
 
 // Steven's phone numbers
 const STEVEN_NUMBERS = ["+15613012117", "+15615041239", "+15616285628"];
@@ -172,6 +251,55 @@ app.get("/health", (req, res) => {
 });
 
 // ========================================
+// GROK TTS — synthesize scripted audio with a flagship Grok voice (replaces Polly)
+// ========================================
+const AUDIO_DIR = os.tmpdir();
+app.use("/audio", express.static(AUDIO_DIR));
+
+app.post("/tts", async (req, res) => {
+  try {
+    const text = String(req.body.text || "").trim();
+    const voice = String(req.body.voice || DEFAULT_VOICE);
+    if (!text) return res.status(400).json({ error: "text required" });
+
+    const audio = await grokTTS(text, voice);
+    const fname = `grok_${Date.now()}_${crypto.randomBytes(3).toString("hex")}.mp3`;
+    fs.writeFileSync(require("path").join(AUDIO_DIR, fname), audio);
+
+    const proto = "https";
+    const base = `${proto}://${req.get("host")}`;
+    console.log(`[TTS] ${voice} -> ${fname} (${audio.length} bytes)`);
+    return res.json({ url: `${base}/audio/${fname}`, voice, bytes: audio.length });
+  } catch (e: any) {
+    console.log(`[TTS] error: ${e.message}`);
+    return res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+// TwiML that plays a Grok-voiced script — for one-shot / voicemail calls.
+// POST { text, voice?, thenRecord? } -> TwiML <Play>
+app.post("/say-twiml", async (req, res) => {
+  try {
+    const text = String(req.body.text || "").trim();
+    const voice = String(req.body.voice || DEFAULT_VOICE);
+    if (!text) {
+      return res.status(400).type("text/xml").end(`<Response><Say>No text provided.</Say></Response>`);
+    }
+    const audio = await grokTTS(text, voice);
+    const fname = `grok_${Date.now()}_${crypto.randomBytes(3).toString("hex")}.mp3`;
+    fs.writeFileSync(require("path").join(AUDIO_DIR, fname), audio);
+    const url = `https://${req.get("host")}/audio/${fname}`;
+    console.log(`[SAY-TWIML] ${voice} -> ${url}`);
+    res.status(200).type("text/xml");
+    res.end(`<?xml version="1.0" encoding="UTF-8"?><Response><Play>${url}</Play></Response>`);
+  } catch (e: any) {
+    console.log(`[SAY-TWIML] error: ${e.message}`);
+    res.status(500).type("text/xml");
+    res.end(`<?xml version="1.0" encoding="UTF-8"?><Response><Say>Sorry, something went wrong.</Say></Response>`);
+  }
+});
+
+// ========================================
 // Twilio Voice Webhook - inbound (not primary use case here)
 // ========================================
 app.post("/twiml", (req, res) => {
@@ -215,7 +343,7 @@ app.post("/inbound-sms", (req, res) => {
 // ========================================
 // INBOUND VOICE — someone is calling our Twilio number
 // ========================================
-app.post("/inbound-voice", (req, res) => {
+app.post("/inbound-voice", async (req, res) => {
   const from = (req.body.From || "").trim();
   const callSid = (req.body.CallSid || "").trim();
   const fromNormalized = from.replace(/\D/g, "");
@@ -228,14 +356,16 @@ app.post("/inbound-voice", (req, res) => {
   const callId = `inbound_${crypto.randomBytes(6).toString('hex')}`;
 
   if (isSteven) {
-    // Steven called — just play a brief greeting and record any instructions
+    // Steven called — play a brief greeting and record any instructions
+    const greeting = await playPhrase("Hey Steven. I'm listening — what do you need?");
+    const closing = await playPhrase("Got it. I'll take care of it. Talk soon.");
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Joanna">Hey Steven. I'm listening. What do you need?</Say>
+  ${greeting}
   <Record maxLength="120" transcribe="true" timeout="15" finishOnKey="#"
     action="/inbound-recording?callId=${callId}&from=${encodeURIComponent(from)}"
     transcribeCallback="/inbound-transcription?callId=${callId}&from=${encodeURIComponent(from)}"/>
-  <Say voice="Polly.Joanna">Got it, I'll handle it. Bye.</Say>
+  ${closing}
 </Response>`;
     res.status(200);
     res.type("text/xml");
@@ -253,11 +383,13 @@ app.post("/inbound-voice", (req, res) => {
   }
 
   if (!HOSTNAME) {
+    const hello = await playPhrase("Hello, you've reached 723 Studios. How can I help you?");
+    const bye = await playPhrase("Thank you, goodbye.");
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Joanna">Hello, you've reached 723 Studios. How can I help you?</Say>
+  ${hello}
   <Record maxLength="120" transcribe="true" timeout="30" finishOnKey="#"/>
-  <Say voice="Polly.Joanna">Thank you, goodbye.</Say>
+  ${bye}
 </Response>`;
     res.status(200);
     res.type("text/xml");
@@ -332,9 +464,10 @@ app.post("/start-call", async (req, res) => {
   // Phase 1: simple Say to confirm Twilio reaches us
   // Phase 2: redirect to stream via /connect endpoint
   const connectUrl = `${proto}://${req.get("host")}/connect-stream/${callId}?scenario=${encodeURIComponent(scenario)}&ctx=${ctxEncoded}`;
+  const waitMsg = await playPhrase("One moment, connecting you now.");
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Joanna">Connection in progress, one moment please.</Say>
+  ${waitMsg}
   <Pause length="2"/>
   <Redirect method="POST">${connectUrl}</Redirect>
 </Response>`;
@@ -584,7 +717,7 @@ app.post("/call-status", (req, res) => {
 // ========================================
 // Handoff TwiML — redirects an active call to Steven's phone
 // ========================================
-app.post("/handoff-twiml/:callId", (req, res) => {
+app.post("/handoff-twiml/:callId", async (req, res) => {
   const callId = req.params.callId;
   const reason = (req.query.reason as string) || "the caller needs human assistance";
   const h = pendingHandoffs[callId];
@@ -592,13 +725,15 @@ app.post("/handoff-twiml/:callId", (req, res) => {
   console.log(`[${callId}] === HANDSET HANDOFF: ${reason} ===`);
   if (h) console.log(`  Remote: ${h.remoteNumber}, CallSid: ${h.callSid}`);
 
+  const holdMsg = await playPhrase("Sure, let me get someone on the line for you — one second.");
+  const noAnswer = await playPhrase("Sorry, nobody's picking up right now. I'll have someone call you back shortly. Thanks for your patience.");
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Joanna">Please hold while I connect you with someone who can assist.</Say>
+  ${holdMsg}
   <Dial timeout="30" callerId="${TWILIO_PHONE_NUMBER}">
     <Number>${HANDOFF_PHONE}</Number>
   </Dial>
-  <Say voice="Polly.Joanna">I'm sorry, no one is available right now. Someone will call you back shortly. Thank you.</Say>
+  ${noAnswer}
 </Response>`;
   res.status(200);
   res.type("text/xml");

@@ -1,0 +1,147 @@
+[
+  {
+    "voice": "eve",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "ara",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "rex",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "sal",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "leo",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "castor",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "atlas",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "lumen",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "rigel",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "orion",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "sirius",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "perseus",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "celeste",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "ursa",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "carina",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "zagan",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "helix",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "luna",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "iris",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "altair",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "zenith",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "helios",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "lux",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "kepler",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "cosmo",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "lumenx",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "naksh",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "aurora",
+    "ok": true,
+    "reason": "session.created"
+  },
+  {
+    "voice": "liora",
+    "ok": true,
+    "reason": "session.created"
+  }
+]
