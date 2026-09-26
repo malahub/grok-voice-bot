@@ -8,6 +8,14 @@ import * as os from "os";
 import Twilio from "twilio";
 import { getScenario, SCENARIOS, renderInstructions, CallContext, getVoiceForScenario, DEFAULT_VOICE } from "./scenarios";
 import { TwilioMediaStreamWebsocket } from "./twilio";
+import {
+  requireApiKey,
+  validateTwilioSignature,
+  rateLimitStartCall,
+  randomToken,
+  timingSafeStringEquals,
+  securitySummary,
+} from "./security";
 
 const { app } = ExpressWs(express());
 app.use(express.urlencoded({ extended: true })).use(express.json());
@@ -193,6 +201,70 @@ const pendingHandoffs: Record<string, { callSid: string; reason: string; remoteN
 let serverBaseUrl = "";
 
 // ========================================
+// Per-call media-stream sessions (auth + config for the websocket)
+// ========================================
+// The TwiML <Stream> URL handed to Twilio carries ONLY a random per-call token.
+// The scenario / context / instructions live here, server-side, and the
+// websocket refuses to connect without a matching unexpired token — so a
+// stranger who guesses a callId can no longer drive the voice agent.
+const STREAM_SESSION_TTL_MS = Number(process.env.STREAM_SESSION_TTL_MS || 2 * 60 * 60 * 1000);
+type StreamSession = {
+  token: string;
+  scenario: string;
+  ctx: CallContext;
+  instructions: string;
+  createdAt: number;
+  expiresAt: number;
+};
+const streamSessions: Record<string, StreamSession> = {};
+
+function pruneStreamSessions(now = Date.now()) {
+  for (const id of Object.keys(streamSessions)) {
+    if (streamSessions[id].expiresAt <= now) delete streamSessions[id];
+  }
+}
+
+function issueStreamSession(callId: string, opts: { scenario?: string; ctx?: any; instructions?: string }): StreamSession {
+  const scenario = opts.scenario && SCENARIOS[opts.scenario] ? opts.scenario : "balance_check";
+  const ctx: CallContext = { ...(opts.ctx || {}) };
+  if (!ctx.name) ctx.name = "Steven";
+  pruneStreamSessions();
+  const session: StreamSession = {
+    token: randomToken(32),
+    scenario,
+    ctx,
+    instructions: opts.instructions || renderInstructions(scenario, ctx),
+    createdAt: Date.now(),
+    expiresAt: Date.now() + STREAM_SESSION_TTL_MS,
+  };
+  streamSessions[callId] = session;
+  return session;
+}
+
+/** Reuse an unexpired session (so /start-call's config wins), else mint one. */
+function ensureStreamSession(callId: string, opts: { scenario?: string; ctx?: any; instructions?: string }): StreamSession {
+  const existing = streamSessions[callId];
+  if (existing && existing.expiresAt > Date.now()) return existing;
+  return issueStreamSession(callId, opts);
+}
+
+/** Constant-time token check; returns null unless callId+token are both valid. */
+function getStreamSession(callId: string, token: string): StreamSession | null {
+  const s = streamSessions[callId];
+  if (!s) return null;
+  if (s.expiresAt <= Date.now()) {
+    delete streamSessions[callId];
+    return null;
+  }
+  if (!token || !timingSafeStringEquals(token, s.token)) return null;
+  return s;
+}
+
+function streamUrlFor(callId: string, session: StreamSession): string {
+  return `wss://${HOSTNAME}/media-stream/${callId}?token=${encodeURIComponent(session.token)}`;
+}
+
+// ========================================
 // Tool Handlers
 // ========================================
 async function handleToolCall(callId: string, name: string, args: Record<string, any>): Promise<string> {
@@ -337,7 +409,7 @@ app.post("/say-twiml", async (req, res) => {
 // ========================================
 // Twilio Voice Webhook - inbound (not primary use case here)
 // ========================================
-app.post("/twiml", (req, res) => {
+app.post("/twiml", validateTwilioSignature, (req, res) => {
   res.status(200);
   res.type("text/xml");
   res.end(`<Response><Say>Hello.</Say></Response>`);
@@ -346,7 +418,7 @@ app.post("/twiml", (req, res) => {
 // ========================================
 // INBOUND SMS — receives texts to our Twilio number
 // ========================================
-app.post("/inbound-sms", (req, res) => {
+app.post("/inbound-sms", validateTwilioSignature, (req, res) => {
   const from = (req.body.From || "").trim();
   const body = (req.body.Body || "").trim();
   const fromNormalized = from.replace(/\D/g, "");
@@ -378,7 +450,7 @@ app.post("/inbound-sms", (req, res) => {
 // ========================================
 // INBOUND VOICE — someone is calling our Twilio number
 // ========================================
-app.post("/inbound-voice", async (req, res) => {
+app.post("/inbound-voice", validateTwilioSignature, async (req, res) => {
   const from = (req.body.From || "").trim();
   const callSid = (req.body.CallSid || "").trim();
   const fromNormalized = from.replace(/\D/g, "");
@@ -432,8 +504,8 @@ app.post("/inbound-voice", async (req, res) => {
     return;
   }
 
-  const instructionsEncoded = encodeURIComponent(instructions);
-  const streamUrl = `wss://${HOSTNAME}/media-stream/${callId}?scenario=balance_check&instructions=${instructionsEncoded}`;
+  const session = issueStreamSession(callId, { scenario: "balance_check", ctx: caller?.context, instructions });
+  const streamUrl = streamUrlFor(callId, session);
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
@@ -446,7 +518,7 @@ app.post("/inbound-voice", async (req, res) => {
 });
 
 // Inbound recording callback
-app.post("/inbound-recording", (req, res) => {
+app.post("/inbound-recording", validateTwilioSignature, (req, res) => {
   const callId = req.query.callId as string;
   const recordingUrl = req.body.RecordingUrl || "";
   console.log(`[${callId}] Recording: ${recordingUrl}`);
@@ -454,7 +526,7 @@ app.post("/inbound-recording", (req, res) => {
 });
 
 // Inbound transcription callback
-app.post("/inbound-transcription", (req, res) => {
+app.post("/inbound-transcription", validateTwilioSignature, (req, res) => {
   const callId = req.query.callId as string;
   const text = (req.body.TranscriptionText || "").trim();
   const from = (req.query.from as string) || "unknown";
@@ -475,7 +547,7 @@ app.post("/inbound-transcription", (req, res) => {
 //  1. Makes a Twilio outbound call that points at /conn (TwiML)
 //  2. Twilio connects <Stream> to /media-stream/:callId
 //  3. Our /media-stream WebSocket bridges audio to xAI Grok Voice
-app.post("/start-call", async (req, res) => {
+app.post("/start-call", requireApiKey, rateLimitStartCall, async (req, res) => {
   const { to, scenario, from, context } = req.body || {};
   if (!to) return res.status(400).json({ error: "Missing 'to' (target phone number)" });
   if (!scenario) return res.status(400).json({ error: "Missing 'scenario'" });
@@ -492,10 +564,12 @@ app.post("/start-call", async (req, res) => {
   const ctx = context || {};
   if (!ctx.name) ctx.name = "Steven";
 
-  // Build the stream URL with context info
+  // Register the per-call stream session; the <Stream> URL only ever carries a
+  // random token, never the scenario/context/instructions.
+  const session = issueStreamSession(callId, { scenario, ctx });
   const proto = "https";
   const ctxEncoded = encodeURIComponent(JSON.stringify(ctx));
-  const streamUrl = `wss://${HOSTNAME}/media-stream/${callId}?scenario=${encodeURIComponent(scenario)}&ctx=${ctxEncoded}`;
+  const streamUrl = streamUrlFor(callId, session);
   // Phase 1: simple Say to confirm Twilio reaches us
   // Phase 2: redirect to stream via /connect endpoint
   const connectUrl = `${proto}://${req.get("host")}/connect-stream/${callId}?scenario=${encodeURIComponent(scenario)}&ctx=${ctxEncoded}`;
@@ -525,7 +599,7 @@ app.post("/start-call", async (req, res) => {
   logCall(target, scenario, ctx);
 });
 // ========================================
-app.post("/conn", (req, res) => {
+app.post("/conn", validateTwilioSignature, (req, res) => {
   const scenario = (req.query.scenario as string) || "balance_check";
   const callId = (req.query.callId as string) || `call_${crypto.randomBytes(6).toString('hex')}`;
   const ctxRaw = (req.query.ctx as string) || "{}";
@@ -534,9 +608,16 @@ app.post("/conn", (req, res) => {
     return;
   }
 
+  let session: StreamSession;
+  try {
+    session = ensureStreamSession(callId, { scenario, ctx: JSON.parse(ctxRaw) });
+  } catch (_e) {
+    session = ensureStreamSession(callId, { scenario, ctx: {} });
+  }
+
   res.status(200);
   res.type("text/xml");
-  const streamUrl = `wss://${HOSTNAME}/media-stream/${callId}?scenario=${encodeURIComponent(scenario)}&ctx=${encodeURIComponent(ctxRaw)}`;
+  const streamUrl = streamUrlFor(callId, session);
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
@@ -547,8 +628,8 @@ app.post("/conn", (req, res) => {
 });
 
 // Second-stage redirect: /connect-stream returns the actual <Connect><Stream>
-app.post("/connect-stream/:callId", (req, res) => {
-  const callId = req.params.callId;
+app.post("/connect-stream/:callId", validateTwilioSignature, (req, res) => {
+  const callId = String(req.params.callId);
   const scenario = (req.query.scenario as string) || "balance_check";
   const ctxRaw = (req.query.ctx as string) || "{}";
   if (!HOSTNAME) {
@@ -556,9 +637,17 @@ app.post("/connect-stream/:callId", (req, res) => {
     return;
   }
 
+  // Reuse the session minted by /start-call when it is still live.
+  let session: StreamSession;
+  try {
+    session = ensureStreamSession(callId, { scenario, ctx: JSON.parse(ctxRaw) });
+  } catch (_e) {
+    session = ensureStreamSession(callId, { scenario, ctx: {} });
+  }
+
   res.status(200);
   res.type("text/xml");
-  const streamUrl = `wss://${HOSTNAME}/media-stream/${callId}?scenario=${encodeURIComponent(scenario)}&ctx=${encodeURIComponent(ctxRaw)}`;
+  const streamUrl = streamUrlFor(callId, session);
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
@@ -573,26 +662,28 @@ app.post("/connect-stream/:callId", (req, res) => {
 // ========================================
 app.ws("/media-stream/:callId", (ws, req) => {
   const callId = String(req.params.callId || "");
-  const scenarioQuery = Array.isArray(req.query.scenario) ? req.query.scenario[0] : req.query.scenario;
-  const scenarioName = String(scenarioQuery || "balance_check");
-  const ctxRaw = Array.isArray(req.query.ctx) ? req.query.ctx[0] : req.query.ctx;
-  let ctx: CallContext = { name: "Steven" };
-  if (ctxRaw) {
-    try {
-      ctx = JSON.parse(String(ctxRaw));
-    } catch (_e) {
-      console.log(`[${callId}] Failed to parse ctx, using default`);
-    }
-  }
-  if (!ctx.name) ctx.name = "Steven";
 
-  // Custom instructions override — passed as query param for inbound calls
-  const instructionsOverride = Array.isArray(req.query.instructions) ? req.query.instructions[0] : req.query.instructions;
-  const instructions = instructionsOverride
-    ? decodeURIComponent(String(instructionsOverride))
-    : renderInstructions(scenarioName, ctx);
+  // ---- Auth gate -------------------------------------------------------
+  // A valid, unexpired, per-call token is mandatory. Scenario / ctx /
+  // instructions are NEVER read from query params any more: they come from the
+  // server-side session minted by /start-call (or the Twilio-signed /conn and
+  // /connect-stream routes), so an unauthenticated client cannot drive the
+  // voice agent at all.
+  const tokenQuery = Array.isArray(req.query.token) ? req.query.token[0] : req.query.token;
+  const session = getStreamSession(callId, String(tokenQuery || ""));
+  if (!session) {
+    console.log(`[${callId}] media-stream REJECTED: missing/invalid/expired token (from ${req.socket?.remoteAddress || "unknown"})`);
+    try {
+      ws.close(1008, "unauthorized");
+    } catch (_e) {}
+    return;
+  }
+
+  const scenarioName = session.scenario;
+  const ctx: CallContext = session.ctx;
+  const instructions = session.instructions;
   console.log(`\n[${callId}] === CALL STARTED (scenario: ${scenarioName}, voice: ${getVoiceForScenario(scenarioName)}) ===`);
-  console.log(`[${callId}] Context: ${JSON.stringify(ctx)}${instructionsOverride ? " [custom instructions]" : ""}`);
+  console.log(`[${callId}] Context: ${JSON.stringify(ctx)} [authenticated stream session]`);
 
   const tw = new TwilioMediaStreamWebsocket(ws);
 
@@ -745,15 +836,15 @@ app.ws("/media-stream/:callId", (ws, req) => {
 // ========================================
 // Call status callback
 // ========================================
-app.post("/call-status", (req, res) => {
+app.post("/call-status", validateTwilioSignature, (req, res) => {
   res.status(200).send();
 });
 
 // ========================================
 // Handoff TwiML — redirects an active call to Steven's phone
 // ========================================
-app.post("/handoff-twiml/:callId", async (req, res) => {
-  const callId = req.params.callId;
+app.post("/handoff-twiml/:callId", validateTwilioSignature, async (req, res) => {
+  const callId = String(req.params.callId);
   const reason = (req.query.reason as string) || "the caller needs human assistance";
   const h = pendingHandoffs[callId];
 
@@ -800,6 +891,7 @@ function findFreePort(): Promise<number> {
         serverBaseUrl = `http://localhost:${PORT}`;
         console.log("  HOSTNAME not set - start cloudflared tunnel and set HOSTNAME.");
       }
+      console.log(`  Security: ${securitySummary()}`);
       console.log(`  Handoff phone: ${HANDOFF_PHONE || "not set"}`);
       console.log("");
   });

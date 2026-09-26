@@ -14,6 +14,9 @@ import fetch from "node-fetch";
 
 const HOSTNAME = (process.env.HOSTNAME || "").replace(/^https?:\/\//, "");
 const PORT = process.env.PORT || 3000;
+// /start-call now requires the shared secret (see SECURITY.md). Without it the
+// server answers 401 and no call is placed.
+const API_KEY = (process.env.VOICE_BOT_API_KEY || "").trim();
 
 async function main() {
   const args = process.argv.slice(2);
@@ -30,12 +33,17 @@ async function main() {
     process.exit(1);
   }
 
+  if (!API_KEY) {
+    console.error("VOICE_BOT_API_KEY is not set - the server will reject /start-call with 401.");
+    process.exit(1);
+  }
+
   const base = HOSTNAME ? `https://${HOSTNAME}` : `http://localhost:${PORT}`;
   console.log(`Starting call scenario=${scenario} to=${to}`);
 
   const res = await fetch(`${base}/start-call`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}` },
     body: JSON.stringify({ to, scenario }),
   });
   const data = await res.json();
